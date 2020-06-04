@@ -27,7 +27,8 @@ enum class MessageAction {
     SESSION_DESCRIPTION,
     CREATE_OFFER,
     CREATE_ANSWER,
-    REMOVE
+    REMOVE,
+    EXIT
 }
 
 data class Message(
@@ -68,7 +69,12 @@ fun Application.modules() {
         }
     }
 
-    val connections = Collections.synchronizedMap(mutableMapOf<String, WebSocketServerSession>())
+    val connections = Collections.synchronizedMap(
+        mutableMapOf<String, WebSocketServerSession>()
+    )
+    val locals = Collections.synchronizedMap(
+        mutableMapOf<String, MutableList<String>>()
+    )
     val gson = Gson()
 
     routing {
@@ -82,50 +88,106 @@ fun Application.modules() {
                         val message = gson.fromJson(data.readText(), Message::class.java) ?: continue
                         println("got message: $message")
                         when(message.action) {
-                            MessageAction.JOIN -> if (connections.size > 1) onJoin(id, connections)
+                            MessageAction.JOIN -> if (connections.size > 1) onJoin(id, connections, message, locals)
                             MessageAction.SESSION_DESCRIPTION -> onSessionDescription(id, connections, message)
                             MessageAction.ICE_CANDIDATE -> onIceCandidate(id, connections, message)
+                            MessageAction.EXIT -> onExit(id, connections, message)
                             else -> println("Unknown action for server: ${message.action}")
                         }
                     }
                 }
             } finally {
-                connections.remove(id)
-                onExit(id, connections)
+                exitAllFromThatClient(id, locals, connections)
             }
         }
     }
 }
 
-suspend fun onIceCandidate(fromId: String, connections: Map<String, WebSocketServerSession>, message: Message) {
-    connections[message.to]?.send(Message(message.action, fromId, message.to, message.text).toFrame())
-    println("sent ICE_CANDIDATE to ${message.to}")
-}
-
-suspend fun onSessionDescription(fromId: String, connections: Map<String, WebSocketServerSession>, message: Message) {
-    val action = if (message.text.contains("offer", true)) {
-        MessageAction.CREATE_ANSWER
+suspend fun exitAllFromThatClient(
+    fromId: String,
+    locals: MutableMap<String, MutableList<String>>,
+    connections: MutableMap<String, WebSocketServerSession>
+) {
+    val curLocals = locals[fromId]
+    if (curLocals == null) {
+        connections.forEach { (id, client) ->
+            if (id != fromId)
+                client.send(Message(MessageAction.REMOVE, fromId, id, fromId).toFrame())
+        }
     } else {
-        MessageAction.SESSION_DESCRIPTION
+        curLocals.forEach { local ->
+            val fullId = getFullId(fromId, local)
+            connections.forEach { (id, client) ->
+                if (id != fromId)
+                    client.send(Message(MessageAction.REMOVE, fullId, id, fullId).toFrame())
+            }
+        }
     }
-    connections[message.to]?.send(Message(action, fromId, message.to, message.text).toFrame())
-    println("sent SESSION_DESCRIPTION to ${message.to}")
+    connections.remove(fromId)
 }
 
-suspend fun onJoin(fromId: String, connections: Map<String, WebSocketServerSession>) {
+suspend fun onJoin(
+    fromId: String,
+    connections: MutableMap<String, WebSocketServerSession>,
+    message: Message,
+    locals: MutableMap<String, MutableList<String>>
+) {
     println("got JOIN message from $fromId")
+
+    val curLocals = locals[fromId]
+    if (message.from != null) {
+        if (curLocals == null) {
+            locals[fromId] = mutableListOf(message.from)
+        } else {
+            curLocals.add(message.from)
+        }
+    }
+    val connection  = connections[fromId]
     connections.forEach { (id, _) ->
-        if (id != fromId) {
-            connections[fromId]?.send(Message(MessageAction.CREATE_OFFER, id, fromId).toFrame())
+        if (!id.startsWith(fromId)) {
+            connection?.send(Message(MessageAction.CREATE_OFFER, id, getFullId(fromId, message.from)).toFrame())
             println("sent CREATE_OFFER to $fromId")
         }
     }
 }
 
-suspend fun onExit(whoId: String, connections: MutableMap<String, WebSocketServerSession>) {
-    connections.forEach { (id, client) ->
-        client.send(Message(MessageAction.REMOVE, null, id, whoId).toFrame())
+suspend fun onIceCandidate(fromId: String, connections: MutableMap<String, WebSocketServerSession>, message: Message) {
+    val mainId = getMainId(message.to)
+    val connection = connections[mainId]
+    connection?.send(Message(message.action, getFullId(fromId, message.from), message.to, message.text).toFrame())
+    println("sent ICE_CANDIDATE to $mainId")
+}
+
+suspend fun onSessionDescription(fromId: String, connections: MutableMap<String, WebSocketServerSession>, message: Message) {
+    val action = if (message.text.contains("offer", true)) {
+        MessageAction.CREATE_ANSWER
+    } else {
+        MessageAction.SESSION_DESCRIPTION
     }
+    val mainId = getMainId(message.to)
+    val connection = connections[mainId]
+    connection?.send(Message(action, getFullId(fromId, message.from), message.to, message.text).toFrame())
+    println("sent SESSION_DESCRIPTION to $mainId")
+}
+
+fun getMainId(to: String?): String {
+    if (to == null) return ""
+    if (":" in to) return to.split(":")[0]
+    return to
+}
+
+suspend fun onExit(fromId: String, connections: MutableMap<String, WebSocketServerSession>, message: Message) {
+    val fullId = getFullId(fromId, message.from)
+    connections.forEach { (id, client) ->
+        if (id != fromId)
+            client.send(Message(MessageAction.REMOVE, fullId, id).toFrame())
+    }
+    println("exited")
+}
+
+fun getFullId(id: String, local: String?): String {
+    if (local == null) return id
+    return "$id:$local"
 }
 
 fun Message.toFrame(): Frame {
