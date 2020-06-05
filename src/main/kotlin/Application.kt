@@ -73,7 +73,7 @@ fun Application.modules() {
         mutableMapOf<String, WebSocketServerSession>()
     )
     val locals = Collections.synchronizedMap(
-        mutableMapOf<String, MutableList<String>>()
+        mutableMapOf<String, MutableSet<String>>()
     )
     val gson = Gson()
 
@@ -86,12 +86,11 @@ fun Application.modules() {
                 for (data in incoming) {
                     if (data is Frame.Text) {
                         val message = gson.fromJson(data.readText(), Message::class.java) ?: continue
-                        println("got message: $message")
                         when(message.action) {
                             MessageAction.JOIN -> if (connections.size > 1) onJoin(id, connections, message, locals)
-                            MessageAction.SESSION_DESCRIPTION -> onSessionDescription(id, connections, message)
-                            MessageAction.ICE_CANDIDATE -> onIceCandidate(id, connections, message)
-                            MessageAction.EXIT -> onExit(id, connections, message)
+                            MessageAction.SESSION_DESCRIPTION -> onSessionDescription(id, connections, message, locals)
+                            MessageAction.ICE_CANDIDATE -> onIceCandidate(id, connections, message, locals)
+                            MessageAction.EXIT -> onExit(id, connections, message, locals)
                             else -> println("Unknown action for server: ${message.action}")
                         }
                     }
@@ -105,7 +104,7 @@ fun Application.modules() {
 
 suspend fun exitAllFromThatClient(
     fromId: String,
-    locals: MutableMap<String, MutableList<String>>,
+    locals: MutableMap<String, MutableSet<String>>,
     connections: MutableMap<String, WebSocketServerSession>
 ) {
     val curLocals = locals[fromId]
@@ -130,35 +129,59 @@ suspend fun onJoin(
     fromId: String,
     connections: MutableMap<String, WebSocketServerSession>,
     message: Message,
-    locals: MutableMap<String, MutableList<String>>
+    locals: MutableMap<String, MutableSet<String>>
 ) {
     println("got JOIN message from $fromId")
 
     val curLocals = locals[fromId]
     if (message.from != null) {
         if (curLocals == null) {
-            locals[fromId] = mutableListOf(message.from)
+            locals[fromId] = mutableSetOf(message.from)
         } else {
             curLocals.add(message.from)
         }
     }
     val connection  = connections[fromId]
     connections.forEach { (id, _) ->
-        if (!id.startsWith(fromId)) {
-            connection?.send(Message(MessageAction.CREATE_OFFER, id, getFullId(fromId, message.from)).toFrame())
+        if (id != fromId) {
+            val toLocals = locals[id]
+            if (toLocals == null) {
+                connection?.send(Message(MessageAction.CREATE_OFFER, id, getFullId(fromId, message.from)).toFrame())
+            } else {
+                toLocals.forEach { localId ->
+                    connection?.send(Message(MessageAction.CREATE_OFFER, getFullId(id, localId), getFullId(fromId, message.from)).toFrame())
+                }
+            }
             println("sent CREATE_OFFER to $fromId")
         }
     }
 }
 
-suspend fun onIceCandidate(fromId: String, connections: MutableMap<String, WebSocketServerSession>, message: Message) {
+suspend fun onIceCandidate(
+    fromId: String,
+    connections: MutableMap<String, WebSocketServerSession>,
+    message: Message,
+    locals: MutableMap<String, MutableSet<String>>
+) {
     val mainId = getMainId(message.to)
     val connection = connections[mainId]
-    connection?.send(Message(message.action, getFullId(fromId, message.from), message.to, message.text).toFrame())
+    val toLocals = locals[message.to]
+    if (toLocals?.isNotEmpty() == true) {
+        toLocals.forEach { local ->
+            connection?.send(Message(message.action, getFullId(fromId, message.from), getFullId(message.to, local), message.text).toFrame())
+        }
+    } else {
+        connection?.send(Message(message.action, getFullId(fromId, message.from), message.to, message.text).toFrame())
+    }
     println("sent ICE_CANDIDATE to $mainId")
 }
 
-suspend fun onSessionDescription(fromId: String, connections: MutableMap<String, WebSocketServerSession>, message: Message) {
+suspend fun onSessionDescription(
+    fromId: String,
+    connections: MutableMap<String, WebSocketServerSession>,
+    message: Message,
+    locals: MutableMap<String, MutableSet<String>>
+) {
     val action = if (message.text.contains("offer", true)) {
         MessageAction.CREATE_ANSWER
     } else {
@@ -166,7 +189,14 @@ suspend fun onSessionDescription(fromId: String, connections: MutableMap<String,
     }
     val mainId = getMainId(message.to)
     val connection = connections[mainId]
-    connection?.send(Message(action, getFullId(fromId, message.from), message.to, message.text).toFrame())
+    val toLocals = locals[message.to]
+    if (toLocals?.isNotEmpty() == true) {
+        toLocals.forEach { local ->
+            connection?.send(Message(action, getFullId(fromId, message.from), getFullId(message.to, local), message.text).toFrame())
+        }
+    } else {
+        connection?.send(Message(action, getFullId(fromId, message.from), message.to, message.text).toFrame())
+    }
     println("sent SESSION_DESCRIPTION to $mainId")
 }
 
@@ -176,17 +206,22 @@ fun getMainId(to: String?): String {
     return to
 }
 
-suspend fun onExit(fromId: String, connections: MutableMap<String, WebSocketServerSession>, message: Message) {
+suspend fun onExit(
+    fromId: String,
+    connections: MutableMap<String, WebSocketServerSession>,
+    message: Message,
+    locals: MutableMap<String, MutableSet<String>>
+) {
     val fullId = getFullId(fromId, message.from)
     connections.forEach { (id, client) ->
         if (id != fromId)
             client.send(Message(MessageAction.REMOVE, fullId, id).toFrame())
     }
-    println("exited")
+    locals[fromId]?.remove(message.from)
 }
 
-fun getFullId(id: String, local: String?): String {
-    if (local == null) return id
+fun getFullId(id: String?, local: String?): String {
+    if (local == null) return id ?: ""
     return "$id:$local"
 }
 
