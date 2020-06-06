@@ -88,8 +88,8 @@ fun Application.modules() {
                         val message = gson.fromJson(data.readText(), Message::class.java) ?: continue
                         when(message.action) {
                             MessageAction.JOIN -> onJoin(id, connections, message, locals)
-                            MessageAction.SESSION_DESCRIPTION -> onSessionDescription(id, connections, message, locals)
-                            MessageAction.ICE_CANDIDATE -> onIceCandidate(id, connections, message, locals)
+                            MessageAction.SESSION_DESCRIPTION -> onSessionDescription(id, connections, message)
+                            MessageAction.ICE_CANDIDATE -> onIceCandidate(id, connections, message)
                             MessageAction.EXIT -> onExit(id, connections, message, locals)
                             else -> println("Unknown action for server: ${message.action}")
                         }
@@ -107,21 +107,30 @@ suspend fun exitAllFromThatClient(
     locals: MutableMap<String, MutableSet<String>>,
     connections: MutableMap<String, WebSocketServerSession>
 ) {
-    val curLocals = locals[fromId]
-    if (curLocals == null) {
+    println("Removed connection $fromId")
+    val fromLocals = locals[fromId]
+    if (fromLocals == null) {
         connections.forEach { (id, client) ->
             if (id != fromId)
                 client.send(Message(MessageAction.REMOVE, fromId, id, fromId).toFrame())
         }
     } else {
-        curLocals.forEach { local ->
+        fromLocals.forEach { local ->
             val fullId = getFullId(fromId, local)
-            connections.forEach { (id, client) ->
-                if (id != fromId)
+            for ((id, client) in connections) {
+                if (id == fromId) continue
+                val toLocals = locals[id]
+                if (toLocals != null) {
+                    toLocals.forEach { localId ->
+                        client.send(Message(MessageAction.REMOVE, fullId, getFullId(id, localId), fullId).toFrame())
+                    }
+                } else {
                     client.send(Message(MessageAction.REMOVE, fullId, id, fullId).toFrame())
+                }
             }
         }
     }
+    println("Removed connection $fromId")
     connections.remove(fromId)
 }
 
@@ -146,14 +155,11 @@ suspend fun onJoin(
     connections.forEach { (id, _) ->
         if (id != fromId) {
             val toLocals = locals[id]
-            if (toLocals == null) {
-                connection?.send(Message(MessageAction.CREATE_OFFER, id, getFullId(fromId, message.from)).toFrame())
-            } else {
-                toLocals.forEach { localId ->
-                    connection?.send(Message(MessageAction.CREATE_OFFER, getFullId(id, localId), getFullId(fromId, message.from)).toFrame())
-                }
+            toLocals?.forEach { localId ->
+                val fullFromId = getFullId(id, localId)
+                connection?.send(Message(MessageAction.CREATE_OFFER, fullFromId, getFullId(fromId, message.from)).toFrame())
+                println("sent CREATE_OFFER to $fullFromId")
             }
-            println("sent CREATE_OFFER to $fromId")
         }
     }
 }
@@ -161,27 +167,19 @@ suspend fun onJoin(
 suspend fun onIceCandidate(
     fromId: String,
     connections: MutableMap<String, WebSocketServerSession>,
-    message: Message,
-    locals: MutableMap<String, MutableSet<String>>
+    message: Message
 ) {
     val mainId = getMainId(message.to)
     val connection = connections[mainId]
-    val toLocals = locals[message.to]
-    if (toLocals?.isNotEmpty() == true) {
-        toLocals.forEach { local ->
-            connection?.send(Message(message.action, getFullId(fromId, message.from), getFullId(message.to, local), message.text).toFrame())
-        }
-    } else {
-        connection?.send(Message(message.action, getFullId(fromId, message.from), message.to, message.text).toFrame())
-    }
-    println("sent ICE_CANDIDATE to $mainId")
+    val fullId = getFullId(fromId, message.from)
+    connection?.send(Message(message.action, fullId, message.to, message.text).toFrame())
+    println("sent ICE_CANDIDATE to $fullId")
 }
 
 suspend fun onSessionDescription(
     fromId: String,
     connections: MutableMap<String, WebSocketServerSession>,
-    message: Message,
-    locals: MutableMap<String, MutableSet<String>>
+    message: Message
 ) {
     val action = if (message.text.contains("offer", true)) {
         MessageAction.CREATE_ANSWER
@@ -190,15 +188,9 @@ suspend fun onSessionDescription(
     }
     val mainId = getMainId(message.to)
     val connection = connections[mainId]
-    val toLocals = locals[message.to]
-    if (toLocals?.isNotEmpty() == true) {
-        toLocals.forEach { local ->
-            connection?.send(Message(action, getFullId(fromId, message.from), getFullId(message.to, local), message.text).toFrame())
-        }
-    } else {
-        connection?.send(Message(action, getFullId(fromId, message.from), message.to, message.text).toFrame())
-    }
-    println("sent SESSION_DESCRIPTION to $mainId")
+    val fullId = getFullId(fromId, message.from)
+    connection?.send(Message(action, fullId, message.to, message.text).toFrame())
+    println("sent SESSION_DESCRIPTION to $fullId")
 }
 
 fun getMainId(to: String?): String {
@@ -215,8 +207,12 @@ suspend fun onExit(
 ) {
     val fullId = getFullId(fromId, message.from)
     connections.forEach { (id, client) ->
-        if (id != fromId)
-            client.send(Message(MessageAction.REMOVE, fullId, id).toFrame())
+        if (id != fromId) {
+            val toLocals = locals[id]
+            toLocals?.forEach { localId ->
+                client.send(Message(MessageAction.REMOVE, fullId, getFullId(id, localId)).toFrame())
+            }?.also { println("sent REMOVE to $fullId") }
+        }
     }
     locals[fromId]?.remove(message.from)
 }
