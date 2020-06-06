@@ -87,7 +87,7 @@ fun Application.modules() {
                     if (data is Frame.Text) {
                         val message = gson.fromJson(data.readText(), Message::class.java) ?: continue
                         when(message.action) {
-                            MessageAction.JOIN -> if (connections.size > 1) onJoin(id, connections, message, locals)
+                            MessageAction.JOIN -> onJoin(id, connections, message, locals)
                             MessageAction.SESSION_DESCRIPTION -> onSessionDescription(id, connections, message, locals)
                             MessageAction.ICE_CANDIDATE -> onIceCandidate(id, connections, message, locals)
                             MessageAction.EXIT -> onExit(id, connections, message, locals)
@@ -141,6 +141,7 @@ suspend fun onJoin(
             curLocals.add(message.from)
         }
     }
+    if (connections.size <= 1) return
     val connection  = connections[fromId]
     connections.forEach { (id, _) ->
         if (id != fromId) {
