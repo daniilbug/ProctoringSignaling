@@ -17,7 +17,11 @@ import io.ktor.server.netty.Netty
 import io.ktor.websocket.WebSocketServerSession
 import io.ktor.websocket.WebSockets
 import io.ktor.websocket.webSocket
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.InternalCoroutinesApi
+import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.launch
 import java.time.Duration
 import java.util.*
 
@@ -38,6 +42,7 @@ data class Message(
     val text: String = ""
 )
 
+@InternalCoroutinesApi
 @ExperimentalCoroutinesApi
 fun main() {
     embeddedServer(Netty, applicationEngineEnvironment {
@@ -49,6 +54,7 @@ fun main() {
     }).start(true)
 }
 
+@InternalCoroutinesApi
 @ExperimentalCoroutinesApi
 fun Application.modules() {
     install(DefaultHeaders) {
@@ -82,23 +88,20 @@ fun Application.modules() {
             val id = UUID.randomUUID().toString()
             connections[id] = this
             println("Connected clients = ${connections.size}")
-            try {
-                for (data in incoming) {
-                    if (data is Frame.Text) {
-                        val text = data.readText()
-                        val message = gson.fromJson(text, Message::class.java)
-                        when(message.action) {
-                            MessageAction.JOIN -> onJoin(id, connections, message, locals)
-                            MessageAction.SESSION_DESCRIPTION -> onSessionDescription(id, connections, message)
-                            MessageAction.ICE_CANDIDATE -> onIceCandidate(id, connections, message)
-                            MessageAction.EXIT -> onExit(id, connections, message, locals)
-                            else -> println("Unknown action for server: ${message.action}")
-                        }
+            incoming.consumeAsFlow().filterIsInstance<Frame.Text>()
+                .catch { ex -> println(ex); exitAllFromThatClient(id, locals, connections) }
+                .onCompletion { exitAllFromThatClient(id, locals, connections) }
+                .collect { data ->
+                    val text = data.readText()
+                    val message = gson.fromJson(text, Message::class.java)
+                    when (message.action) {
+                        MessageAction.JOIN -> onJoin(id, connections, message, locals)
+                        MessageAction.SESSION_DESCRIPTION -> onSessionDescription(id, connections, message)
+                        MessageAction.ICE_CANDIDATE -> onIceCandidate(id, connections, message)
+                        MessageAction.EXIT -> onExit(id, connections, message, locals)
+                        else -> println("Unknown action for server: ${message.action}")
                     }
                 }
-            } finally {
-                exitAllFromThatClient(id, locals, connections)
-            }
         }
     }
 }
@@ -145,11 +148,11 @@ suspend fun onJoin(
     }
     val isProctor = message.from == "proctor"
     if (connections.size <= 1) return
-    val connection  = connections[fromId]
+    val connection = connections[fromId]
     for ((id, _) in connections) {
         if (id != fromId) {
             val toLocals = locals[id]
-            toLocals?.filter { it != message.from }?.forEach { localId ->
+            toLocals?.filter { isProctor && it != "proctor" || !isProctor && it == "proctor" }?.forEach { localId ->
                 val fullFromId = getFullId(id, localId)
                 if (isProctor) {
                     connections[id]?.send(
