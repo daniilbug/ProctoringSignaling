@@ -143,18 +143,33 @@ suspend fun onJoin(
             curLocals.add(message.from)
         }
     }
+    val isProctor = message.from == "proctor"
     if (connections.size <= 1) return
-    val isProctor = fromId == "proctor"
     val connection  = connections[fromId]
     for ((id, _) in connections) {
         if (id != fromId) {
             val toLocals = locals[id]
-            toLocals?.forEach { localId ->
-                if (isProctor && localId == "proctor" || !isProctor && localId != "proctor")
-                    return@forEach
+            toLocals?.filter { it != message.from }?.forEach { localId ->
                 val fullFromId = getFullId(id, localId)
-                connection?.send(Message(MessageAction.CREATE_OFFER, fullFromId, getFullId(fromId, message.from)).toFrame())
-                println("sent CREATE_OFFER to $fullFromId")
+                if (isProctor) {
+                    connections[id]?.send(
+                        Message(
+                            MessageAction.CREATE_OFFER,
+                            getFullId(fromId, message.from),
+                            fullFromId
+                        ).toFrame()
+                    )
+                    println("sent CREATE_OFFER to $fullFromId")
+                } else {
+                    connection?.send(
+                        Message(
+                            MessageAction.CREATE_OFFER,
+                            fullFromId,
+                            getFullId(fromId, message.from)
+                        ).toFrame()
+                    )
+                    println("sent CREATE_OFFER to ${getFullId(fromId, message.from)}")
+                }
             }
         }
     }
